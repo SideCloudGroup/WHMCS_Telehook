@@ -32,7 +32,11 @@ add_hook('DailyCronJob', 1, function () {
 
 add_hook('ClientAreaPrimaryNavbar', 1, function ($navbar) {
     try {
-        if (!is_object($navbar) || !method_exists($navbar, 'addChild')) {
+        $clientId = (int) ($_SESSION['uid'] ?? 0);
+        if ($clientId <= 0 && class_exists(\WHMCS\Session::class)) {
+            $clientId = (int) \WHMCS\Session::get('uid');
+        }
+        if ($clientId <= 0 || !is_object($navbar) || !method_exists($navbar, 'addChild')) {
             return;
         }
         $navbar->addChild('telegramnotify', [
