@@ -13,7 +13,7 @@ function telegramnotify_config(): array
     return [
         'name' => 'Telehook',
         'description' => '客户绑定 Telegram 后，接收产品开通、续费账单和到期提醒。',
-        'version' => '1.0.1',
+        'version' => '1.0.2',
         'author' => 'SideCloud',
         'language' => 'chinese',
         'fields' => [
@@ -33,7 +33,7 @@ function telegramnotify_config(): array
                 'FriendlyName' => 'Webhook Secret',
                 'Type' => 'password',
                 'Size' => '80',
-                'Description' => '随机字符串。Telegram 回调必须带上这个值',
+                'Description' => '随机字符串。保存这里不会注册 Webhook。保存后打开 <a href="addonmodules.php?module=telegramnotify">Telehook</a>，点「注册 Webhook」才能看到是否成功',
             ],
             'base_url' => [
                 'FriendlyName' => '站点地址',
@@ -105,14 +105,47 @@ function telegramnotify_upgrade($vars): void
     }
 }
 
+function telegramnotify_session_token(string $key): string
+{
+    try {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            return '';
+        }
+        $current = $_SESSION[$key] ?? '';
+        if (!is_string($current) || $current === '') {
+            $current = bin2hex(random_bytes(16));
+            $_SESSION[$key] = $current;
+        }
+        return $current;
+    } catch (Throwable $e) {
+        return '';
+    }
+}
+
+function telegramnotify_session_token_ok(string $key): bool
+{
+    $token = (string) ($_POST['token'] ?? '');
+    $expected = '';
+    try {
+        $expected = (string) ($_SESSION[$key] ?? '');
+    } catch (Throwable $e) {
+        return false;
+    }
+    return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+}
+
 function telegramnotify_output($vars): void
 {
     try {
         $posted = (($_POST['action'] ?? '') === 'setwebhook');
-        if ($posted && function_exists('check_token')) {
-            check_token('WHMCS.admin.default');
+        $webhook = null;
+        if ($posted) {
+            if (!telegramnotify_session_token_ok('telehook_admin_csrf')) {
+                $webhook = ['ok' => false, 'message' => '页面已过期，请刷新后再点注册'];
+            } else {
+                $webhook = telegramnotify_ensure_webhook(true);
+            }
         }
-        $webhook = telegramnotify_ensure_webhook(true);
         $rows = [];
         if (telegramnotify_tables_ready()) {
             $rows = Capsule::table('mod_telegram_clients as t')
@@ -121,15 +154,24 @@ function telegramnotify_output($vars): void
                 ->limit(100)
                 ->get(['t.client_id', 't.chat_id', 't.username', 't.blocked_at', 't.updated_at', 'c.firstname', 'c.lastname', 'c.email']);
         }
-        $token = function_exists('generate_token') ? generate_token('plain') : '';
-        $ok = !empty($webhook['ok']);
-        echo '<div class="alert alert-' . ($ok ? 'success' : 'danger') . '">' . telegramnotify_h((string) ($webhook['message'] ?? '')) . '</div>';
-        echo '<p>回调地址：' . telegramnotify_h(telegramnotify_webhook_url()) . '</p>';
+        $token = telegramnotify_session_token('telehook_admin_csrf');
+        echo '<div style="margin-bottom:16px;padding:16px;border:1px solid #d8e2ef;border-radius:8px;background:#fff">';
+        echo '<h3 style="margin-top:0">注册 Webhook</h3>';
+        echo '<p>保存插件设置不会联系 Telegram。只有点这个按钮才会注册，结果会直接显示在下面。</p>';
+        echo '<p>回调地址：<code>' . telegramnotify_h(telegramnotify_webhook_url()) . '</code></p>';
+        if (is_array($webhook)) {
+            $ok = !empty($webhook['ok']);
+            echo '<div class="alert alert-' . ($ok ? 'success' : 'danger') . '">';
+            echo $ok ? 'Webhook 注册成功。' : 'Webhook 注册失败。';
+            echo ' ' . telegramnotify_h((string) ($webhook['message'] ?? ''));
+            echo '</div>';
+        }
         echo '<form method="post" action="addonmodules.php?module=telegramnotify">';
         echo '<input type="hidden" name="token" value="' . telegramnotify_h($token) . '" />';
         echo '<input type="hidden" name="action" value="setwebhook" />';
-        echo '<button type="submit" class="btn btn-primary">重新注册 Webhook</button>';
+        echo '<button type="submit" class="btn btn-primary">注册 Webhook</button>';
         echo '</form>';
+        echo '</div>';
         echo '<h3 style="margin-top:20px">最近绑定</h3>';
         echo '<table class="datatable" width="100%"><tr><th>客户</th><th>Telegram</th><th>状态</th><th>更新时间</th></tr>';
         if (count($rows) === 0) {
@@ -194,15 +236,7 @@ function telegramnotify_client_state(int $clientId): array
 
 function telegramnotify_csrf_ok(): bool
 {
-    $token = (string) ($_POST['token'] ?? '');
-    if ($token === '' || !function_exists('validate_token')) {
-        return false;
-    }
-    try {
-        return validate_token('WHMCS.default', $token);
-    } catch (Throwable $e) {
-        return false;
-    }
+    return telegramnotify_session_token_ok('telehook_client_csrf');
 }
 
 function telegramnotify_clientarea($vars): array
@@ -260,7 +294,7 @@ function telegramnotify_clientarea($vars): array
         'templatefile' => 'clientarea',
         'requirelogin' => true,
         'vars' => [
-            'token' => function_exists('generate_token') ? generate_token('plain') : '',
+            'token' => telegramnotify_session_token('telehook_client_csrf'),
         ],
     ];
 }

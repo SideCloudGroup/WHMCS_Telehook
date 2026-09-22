@@ -15,7 +15,7 @@ Telehook 是一个 WHMCS 插件。客户在客户区绑定一次 Telegram 之后
 1. 把本仓库的 `telegramnotify` 目录复制到 WHMCS 的 `modules/addons/telegramnotify`。
 2. 后台打开「系统设置 → 插件模块」，找到 **Telehook**，点击激活。
 3. 填好下面的配置并保存。
-4. 打开 Telehook 的模块页面。打开时会向 Telegram 注册 Webhook。页面上也可以点「重新注册 Webhook」。
+4. 在插件列表里点 **Telehook** 这个名字（不是「配置」），打开模块页面，点「注册 Webhook」。成功或失败会直接显示在按钮上面。保存配置本身不会注册。
 
 回调地址是：
 
