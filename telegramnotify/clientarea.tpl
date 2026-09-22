@@ -1,4 +1,4 @@
-<div id="tg-notify" data-token="{$token|escape:'html'}">
+<div id="tg-notify" data-token="{$tg_token|escape:'html'}">
 {literal}
 <style>
 #tg-notify {

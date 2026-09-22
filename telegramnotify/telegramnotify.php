@@ -13,7 +13,7 @@ function telegramnotify_config(): array
     return [
         'name' => 'Telehook',
         'description' => '客户绑定 Telegram 后，接收产品开通、续费账单和到期提醒。',
-        'version' => '1.0.2',
+        'version' => '1.0.3',
         'author' => 'SideCloud',
         'language' => 'chinese',
         'fields' => [
@@ -294,7 +294,7 @@ function telegramnotify_clientarea($vars): array
         'templatefile' => 'clientarea',
         'requirelogin' => true,
         'vars' => [
-            'token' => telegramnotify_session_token('telehook_client_csrf'),
+            'tg_token' => telegramnotify_session_token('telehook_client_csrf'),
         ],
     ];
 }
