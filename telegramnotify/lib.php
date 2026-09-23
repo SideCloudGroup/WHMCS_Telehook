@@ -50,23 +50,6 @@ function telegramnotify_bot_username(): string
     return $name;
 }
 
-function telegramnotify_due_days(): array
-{
-    $raw = telegramnotify_setting('due_days');
-    if ($raw === '') {
-        $raw = '7,3,1,0';
-    }
-    $days = [];
-    foreach (preg_split('/\s*,\s*/', $raw) as $part) {
-        if ($part !== '' && preg_match('/^\d+$/', $part)) {
-            $days[] = (int) $part;
-        }
-    }
-    $days = array_values(array_unique($days));
-    sort($days);
-    return $days === [] ? [0, 1, 3, 7] : $days;
-}
-
 function telegramnotify_tables_ready(): bool
 {
     try {
@@ -178,6 +161,7 @@ function telegramnotify_send_chat(string $chatId, string $text, bool $markBlocke
         $resp = telegramnotify_api('sendMessage', [
             'chat_id' => $chatId,
             'text' => $text,
+            'parse_mode' => 'HTML',
             'disable_web_page_preview' => true,
         ]);
         if (!empty($resp['ok'])) {
@@ -430,7 +414,7 @@ function telegramnotify_handle_update(array $update): void
             }
             $result = telegramnotify_consume_token($tokenMatch[1], $chatId, $username);
             if ($result === 'ok') {
-                telegramnotify_send_chat($chatId, "绑定成功。产品开通、续费账单和到期提醒会发到这里。\n发送 /unbind 可解除绑定。", true);
+                telegramnotify_send_chat($chatId, "绑定成功。产品开通、续费账单、催缴和暂停会发到这里。\n发送 /unbind 可解除绑定。", true);
                 return;
             }
             telegramnotify_send_chat($chatId, '绑定链接无效或已过期，请回客户区重新生成。', false);
@@ -511,7 +495,10 @@ function telegramnotify_notify_provision(array $params): void
         if ($product === '') {
             $product = '产品';
         }
-        $text = "产品已开通\n产品：" . $product . "\n域名：" . ($domain !== '' ? $domain : '—');
+        $text = telegramnotify_message('产品已开通', [
+            '产品' => $product,
+            '域名' => $domain !== '' ? $domain : '—',
+        ]);
         if (telegramnotify_send_chat((string) $bind->chat_id, $text, true)) {
             telegramnotify_remember($userId, 'provision', $serviceId, '', $today);
         }
@@ -577,17 +564,17 @@ function telegramnotify_notify_invoice(array $vars): void
         }
         $due = trim((string) $invoice->duedate);
         $base = telegramnotify_base_url();
-        $text = "续费账单已生成\n账单号：#" . $invoiceId . "\n金额：" . $amount . "\n付款截止：" . ($due !== '' ? $due : '—');
+        $rows = [
+            '账单' => '#' . $invoiceId,
+            '金额' => $amount,
+            '付款截止' => $due !== '' ? $due : '—',
+        ];
         if ($lines !== []) {
             $shown = array_slice($lines, 0, 20);
-            $text .= "\n产品：\n- " . implode("\n- ", $shown);
-            if (count($lines) > 20) {
-                $text .= "\n- …";
-            }
+            $rows['产品'] = implode("\n", $shown) . (count($lines) > 20 ? "\n…" : '');
         }
-        if ($base !== '') {
-            $text .= "\n查看账单：" . $base . '/viewinvoice.php?id=' . $invoiceId;
-        }
+        $link = $base !== '' ? $base . '/viewinvoice.php?id=' . $invoiceId : '';
+        $text = telegramnotify_message('续费账单已生成', $rows, '查看账单', $link);
         if (telegramnotify_send_chat((string) $bind->chat_id, $text, true)) {
             telegramnotify_remember($userId, 'invoice', $invoiceId, '', $today);
         }
@@ -596,60 +583,190 @@ function telegramnotify_notify_invoice(array $vars): void
     }
 }
 
-function telegramnotify_notify_due(): void
+function telegramnotify_html(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+function telegramnotify_message(string $title, array $rows, string $linkLabel = '', string $linkUrl = ''): string
+{
+    $lines = ['<b>' . telegramnotify_html($title) . '</b>'];
+    foreach ($rows as $label => $value) {
+        $value = trim((string) $value);
+        if ($value === '') {
+            continue;
+        }
+        $body = telegramnotify_html($value);
+        $lines[] = '';
+        $lines[] = telegramnotify_html((string) $label);
+        $lines[] = '<b>' . str_replace("\n", "</b>\n<b>", $body) . '</b>';
+    }
+    if ($linkLabel !== '' && $linkUrl !== '') {
+        $lines[] = '';
+        $lines[] = '<a href="' . telegramnotify_html($linkUrl) . '">' . telegramnotify_html($linkLabel) . '</a>';
+    }
+    return implode("\n", $lines);
+}
+
+function telegramnotify_reminder_title(string $type): string
+{
+    switch (strtolower($type)) {
+        case 'reminder':
+            return '账单即将到期';
+        case 'overdue':
+        case 'secondoverdue':
+            return '账单已逾期';
+        case 'thirdoverdue':
+            return '账单严重逾期';
+        default:
+            return '账单催缴';
+    }
+}
+
+function telegramnotify_invoice_view(int $invoiceId): ?array
+{
+    $invoice = Capsule::table('tblinvoices')->where('id', $invoiceId)->first();
+    if (!$invoice) {
+        return null;
+    }
+    $status = (string) $invoice->status;
+    if (strcasecmp($status, 'Unpaid') !== 0) {
+        return null;
+    }
+    $userId = (int) $invoice->userid;
+    $items = Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId)->get();
+    $lines = [];
+    foreach ($items as $item) {
+        $label = trim((string) $item->description);
+        $parts = preg_split("/\r\n|\n|\r/", $label);
+        $label = trim((string) ($parts[0] ?? ''));
+        if ((string) $item->type === 'Hosting' && (int) $item->relid > 0) {
+            $hosting = Capsule::table('tblhosting as h')
+                ->leftJoin('tblproducts as p', 'p.id', '=', 'h.packageid')
+                ->where('h.id', (int) $item->relid)
+                ->first(['p.name as product', 'h.domain']);
+            if ($hosting) {
+                $label = trim((string) $hosting->product . ' ' . (string) $hosting->domain);
+            }
+        }
+        if ($label !== '') {
+            $lines[] = $label;
+        }
+    }
+    $code = '';
+    $client = Capsule::table('tblclients')->where('id', $userId)->first();
+    if ($client) {
+        $code = trim((string) Capsule::table('tblcurrencies')->where('id', $client->currency)->value('code'));
+    }
+    $amount = number_format((float) $invoice->total, 2, '.', '');
+    if ($code !== '') {
+        $amount .= ' ' . $code;
+    }
+    $shown = array_slice($lines, 0, 20);
+    $product = implode("\n", $shown);
+    if (count($lines) > 20) {
+        $product .= ($product !== '' ? "\n" : '') . '…';
+    }
+    return [
+        'user_id' => $userId,
+        'amount' => $amount,
+        'due' => trim((string) $invoice->duedate),
+        'product' => $product,
+    ];
+}
+
+function telegramnotify_notify_reminder(array $vars): void
 {
     try {
-        if (!telegramnotify_tables_ready()) {
+        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+        if ($invoiceId <= 0) {
+            return;
+        }
+        $type = strtolower(trim((string) ($vars['type'] ?? 'reminder')));
+        if ($type === '') {
+            $type = 'reminder';
+        }
+        $view = telegramnotify_invoice_view($invoiceId);
+        if ($view === null) {
+            return;
+        }
+        $userId = (int) $view['user_id'];
+        $bind = telegramnotify_active_binding($userId);
+        if ($bind === null) {
             return;
         }
         $today = date('Y-m-d');
-        $wanted = [];
-        foreach (telegramnotify_due_days() as $day) {
-            $date = date('Y-m-d', strtotime($today . ' +' . $day . ' days'));
-            $wanted[$date] = $day;
-        }
-        if ($wanted === []) {
+        if (telegramnotify_already_sent($userId, 'reminder', $invoiceId, $type, $today)) {
             return;
         }
-        $rows = Capsule::table('tblhosting as h')
-            ->join('mod_telegram_clients as t', 't.client_id', '=', 'h.userid')
-            ->leftJoin('tblproducts as p', 'p.id', '=', 'h.packageid')
-            ->whereIn('h.domainstatus', ['Active', 'Suspended'])
-            ->whereIn('h.nextduedate', array_keys($wanted))
-            ->whereNull('t.blocked_at')
-            ->get(['h.id', 'h.userid', 'h.domain', 'h.nextduedate', 'p.name as product', 't.chat_id']);
-        foreach ($rows as $row) {
-            $due = (string) $row->nextduedate;
-            if (!isset($wanted[$due])) {
-                continue;
-            }
-            $day = (int) $wanted[$due];
-            $clientId = (int) $row->userid;
-            $serviceId = (int) $row->id;
-            $marker = (string) $day;
-            if (telegramnotify_already_sent($clientId, 'expiry', $serviceId, $marker, $today)) {
-                continue;
-            }
-            $product = trim((string) $row->product);
-            if ($product === '') {
-                $product = '产品';
-            }
-            $domain = trim((string) $row->domain);
-            if ($day === 0) {
-                $remain = '今天到期';
-            } else {
-                $remain = '剩余 ' . $day . ' 天';
-            }
-            $text = "产品到期提醒\n产品：" . $product . "\n域名：" . ($domain !== '' ? $domain : '—') . "\n到期日：" . $due . "\n" . $remain;
-            $base = telegramnotify_base_url();
-            if ($base !== '') {
-                $text .= "\n查看产品：" . $base . '/clientarea.php?action=productdetails&id=' . $serviceId;
-            }
-            if (telegramnotify_send_chat((string) $row->chat_id, $text, true)) {
-                telegramnotify_remember($clientId, 'expiry', $serviceId, $marker, $today);
-            }
+        $rows = [
+            '账单' => '#' . $invoiceId,
+            '金额' => (string) $view['amount'],
+            '付款截止' => $view['due'] !== '' ? (string) $view['due'] : '—',
+        ];
+        if ($view['product'] !== '') {
+            $rows['产品'] = (string) $view['product'];
+        }
+        $base = telegramnotify_base_url();
+        $link = $base !== '' ? $base . '/viewinvoice.php?id=' . $invoiceId : '';
+        $text = telegramnotify_message(telegramnotify_reminder_title($type), $rows, '查看账单', $link);
+        if (telegramnotify_send_chat((string) $bind->chat_id, $text, true)) {
+            telegramnotify_remember($userId, 'reminder', $invoiceId, $type, $today);
         }
     } catch (Throwable $e) {
-        telegramnotify_log('到期提醒失败: ' . $e->getMessage());
+        telegramnotify_log('催缴通知失败: ' . $e->getMessage());
+    }
+}
+
+function telegramnotify_notify_suspend(array $params): void
+{
+    try {
+        $serviceId = (int) ($params['serviceid'] ?? 0);
+        if ($serviceId <= 0) {
+            return;
+        }
+        $userId = (int) ($params['userid'] ?? 0);
+        $domain = trim((string) ($params['domain'] ?? ''));
+        $reason = trim((string) ($params['suspendreason'] ?? ''));
+        $product = '';
+        $hosting = Capsule::table('tblhosting')->where('id', $serviceId)->first();
+        if ($hosting) {
+            if ($userId <= 0) {
+                $userId = (int) $hosting->userid;
+            }
+            if ($domain === '') {
+                $domain = trim((string) $hosting->domain);
+            }
+            if ($reason === '' && isset($hosting->suspendreason)) {
+                $reason = trim((string) $hosting->suspendreason);
+            }
+            $product = trim((string) Capsule::table('tblproducts')->where('id', $hosting->packageid)->value('name'));
+        }
+        $bind = telegramnotify_active_binding($userId);
+        if ($bind === null) {
+            return;
+        }
+        $today = date('Y-m-d');
+        if (telegramnotify_already_sent($userId, 'suspend', $serviceId, '', $today)) {
+            return;
+        }
+        if ($product === '') {
+            $product = '产品';
+        }
+        $rows = [
+            '产品' => $product,
+            '域名' => $domain !== '' ? $domain : '—',
+        ];
+        if ($reason !== '') {
+            $rows['原因'] = $reason;
+        }
+        $base = telegramnotify_base_url();
+        $link = $base !== '' ? $base . '/clientarea.php?action=productdetails&id=' . $serviceId : '';
+        $text = telegramnotify_message('产品已暂停', $rows, '查看产品', $link);
+        if (telegramnotify_send_chat((string) $bind->chat_id, $text, true)) {
+            telegramnotify_remember($userId, 'suspend', $serviceId, '', $today);
+        }
+    } catch (Throwable $e) {
+        telegramnotify_log('暂停通知失败: ' . $e->getMessage());
     }
 }

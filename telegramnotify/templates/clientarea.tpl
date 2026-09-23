@@ -185,7 +185,8 @@
     <ul class="tg-points">
       <li><span>开通</span>产品开通成功后通知你</li>
       <li><span>账单</span>续费账单生成时通知你</li>
-      <li><span>到期</span>到期前提醒你</li>
+      <li><span>催缴</span>WHMCS 发出催缴时通知你</li>
+      <li><span>暂停</span>产品被暂停时通知你</li>
     </ul>
     <div id="tg-linkbox" class="tg-linkbox" hidden>
       <p>在 Telegram 里打开并点击开始。完成后这个页面会自动更新，不用刷新。</p>

@@ -22,11 +22,19 @@ add_hook('InvoiceCreated', 1, function ($vars) {
     }
 });
 
-add_hook('DailyCronJob', 1, function () {
+add_hook('InvoicePaymentReminder', 1, function ($vars) {
     try {
-        telegramnotify_notify_due();
+        telegramnotify_notify_reminder(is_array($vars) ? $vars : []);
     } catch (Throwable $e) {
-        telegramnotify_log('到期提醒钩子失败: ' . $e->getMessage());
+        telegramnotify_log('催缴通知钩子失败: ' . $e->getMessage());
+    }
+});
+
+add_hook('AfterModuleSuspend', 1, function ($params) {
+    try {
+        telegramnotify_notify_suspend(is_array($params) ? $params : []);
+    } catch (Throwable $e) {
+        telegramnotify_log('暂停通知钩子失败: ' . $e->getMessage());
     }
 });
 

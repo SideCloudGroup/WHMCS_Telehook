@@ -12,8 +12,8 @@ function telegramnotify_config(): array
 {
     return [
         'name' => 'Telehook',
-        'description' => '客户绑定 Telegram 后，接收产品开通、续费账单和到期提醒。',
-        'version' => '1.0.3',
+        'description' => '客户绑定 Telegram 后，接收产品开通、续费账单、催缴和暂停通知。',
+        'version' => '1.0.4',
         'author' => 'SideCloud',
         'language' => 'chinese',
         'fields' => [
@@ -40,13 +40,6 @@ function telegramnotify_config(): array
                 'Type' => 'text',
                 'Size' => '80',
                 'Description' => '客户区和 Webhook 使用的根地址，例如 https://billing.example.com 。留空则用 WHMCS 系统 URL',
-            ],
-            'due_days' => [
-                'FriendlyName' => '到期提醒天数',
-                'Type' => 'text',
-                'Size' => '40',
-                'Default' => '7,3,1,0',
-                'Description' => '逗号分隔。0 表示到期当天',
             ],
         ],
     ];
