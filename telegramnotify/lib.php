@@ -205,6 +205,7 @@ function telegramnotify_ensure_webhook(bool $force): array
                 $current = (string) $info['result']['url'];
             }
             if ($current === $url) {
+                telegramnotify_sync_commands();
                 return ['ok' => true, 'message' => 'Webhook 已是 ' . $url];
             }
         }
@@ -215,6 +216,7 @@ function telegramnotify_ensure_webhook(bool $force): array
             'drop_pending_updates' => false,
         ]);
         if (!empty($resp['ok'])) {
+            telegramnotify_sync_commands();
             return ['ok' => true, 'message' => 'Webhook 已注册: ' . $url];
         }
         $desc = (string) ($resp['description'] ?? 'setWebhook 失败');
@@ -388,6 +390,310 @@ function telegramnotify_unbind_chat(string $chatId): int
     }
 }
 
+function telegramnotify_sync_commands(): void
+{
+    try {
+        $resp = telegramnotify_api('setMyCommands', [
+            'commands' => [
+                ['command' => 'start', 'description' => '开始使用，查看网站和指令'],
+                ['command' => 'products', 'description' => '查询产品、到期时间和续费价格'],
+                ['command' => 'account', 'description' => '查看邮箱、余额和产品数量'],
+                ['command' => 'unbind', 'description' => '解除账户绑定'],
+            ],
+        ]);
+        if (empty($resp['ok'])) {
+            telegramnotify_log('注册指令菜单失败: ' . (string) ($resp['description'] ?? ''));
+        }
+    } catch (Throwable $e) {
+        telegramnotify_log('注册指令菜单失败: ' . $e->getMessage());
+    }
+}
+
+function telegramnotify_company_name(): string
+{
+    try {
+        $value = Capsule::table('tblconfiguration')->where('setting', 'CompanyName')->value('value');
+        return trim((string) $value);
+    } catch (Throwable $e) {
+        return '';
+    }
+}
+
+function telegramnotify_chat_is_bound(string $chatId): bool
+{
+    try {
+        if ($chatId === '' || !telegramnotify_tables_ready()) {
+            return false;
+        }
+        return Capsule::table('mod_telegram_clients')
+            ->where('chat_id', $chatId)
+            ->whereNull('blocked_at')
+            ->exists();
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function telegramnotify_welcome_text(bool $bound): string
+{
+    $company = telegramnotify_company_name();
+    $heading = $company !== '' ? '欢迎使用 ' . $company : '欢迎';
+    $lines = [
+        '<b>' . telegramnotify_html($heading) . '</b>',
+        '',
+        '产品开通、续费账单、催缴和暂停，都会发到这里。',
+        '',
+        '也可以直接查询：',
+        '/products 查看产品、到期时间和续费价格',
+        '/account 查看邮箱、余额和产品数量',
+        '/unbind 解除绑定',
+    ];
+    $base = telegramnotify_base_url();
+    if ($base !== '') {
+        $lines[] = '';
+        $lines[] = '网站';
+        $lines[] = '<a href="' . telegramnotify_html($base) . '">' . telegramnotify_html($base) . '</a>';
+    }
+    $lines[] = '';
+    if ($bound) {
+        $lines[] = '当前账号已绑定，发送上面的指令即可查询。';
+    } else {
+        $lines[] = '查询前需要先绑定。登录客户区，打开「Telegram 通知」，生成链接后回到这里点击开始。';
+        if ($base !== '') {
+            $url = $base . '/index.php?m=telegramnotify';
+            $lines[] = '<a href="' . telegramnotify_html($url) . '">去客户区绑定</a>';
+        }
+    }
+    return implode("\n", $lines);
+}
+
+function telegramnotify_bind_hint(bool $expired): string
+{
+    $lead = $expired
+        ? '绑定已失效，请回客户区重新生成链接。'
+        : '还没有绑定账户。请先在客户区生成绑定链接，再回到这里点击开始。';
+    $base = telegramnotify_base_url();
+    if ($base === '') {
+        return $lead;
+    }
+    $url = $base . '/index.php?m=telegramnotify';
+    return $lead . "\n\n" . '<a href="' . telegramnotify_html($url) . '">打开 Telegram 通知</a>';
+}
+
+function telegramnotify_command_client(string $chatId): ?object
+{
+    try {
+        if ($chatId === '' || !telegramnotify_tables_ready()) {
+            telegramnotify_send_chat($chatId, '暂时无法查询，请稍后再试。', false);
+            return null;
+        }
+        $bind = Capsule::table('mod_telegram_clients')
+            ->where('chat_id', $chatId)
+            ->orderBy('updated_at', 'desc')
+            ->first();
+        if (!$bind || !empty($bind->blocked_at)) {
+            telegramnotify_send_chat($chatId, telegramnotify_bind_hint($bind && !empty($bind->blocked_at)), false);
+            return null;
+        }
+        $client = Capsule::table('tblclients')->where('id', (int) $bind->client_id)->first();
+        if (!$client) {
+            telegramnotify_send_chat($chatId, telegramnotify_bind_hint(true), false);
+            return null;
+        }
+        return $client;
+    } catch (Throwable $e) {
+        telegramnotify_log('读取绑定客户失败: ' . $e->getMessage());
+        telegramnotify_send_chat($chatId, '暂时无法查询，请稍后再试。', false);
+        return null;
+    }
+}
+
+function telegramnotify_currency_row(int $currencyId): ?object
+{
+    try {
+        if ($currencyId <= 0) {
+            return null;
+        }
+        $row = Capsule::table('tblcurrencies')->where('id', $currencyId)->first();
+        return $row ?: null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+function telegramnotify_money(float $amount, ?object $currency): string
+{
+    $text = number_format($amount, 2, '.', '');
+    $code = $currency ? trim((string) ($currency->code ?? '')) : '';
+    if ($code !== '') {
+        return $text . ' ' . $code;
+    }
+    $prefix = $currency ? (string) ($currency->prefix ?? '') : '';
+    $suffix = $currency ? (string) ($currency->suffix ?? '') : '';
+    return $prefix . $text . $suffix;
+}
+
+function telegramnotify_cycle_label(string $cycle): string
+{
+    $map = [
+        'monthly' => '月付',
+        'quarterly' => '季付',
+        'semi-annually' => '半年付',
+        'annually' => '年付',
+        'biennially' => '两年付',
+        'triennially' => '三年付',
+    ];
+    $key = strtolower(trim($cycle));
+    return $map[$key] ?? ($cycle !== '' ? $cycle : '—');
+}
+
+function telegramnotify_renewal_price(object $row, ?object $currency): string
+{
+    $cycle = strtolower(trim((string) ($row->billingcycle ?? '')));
+    if ($cycle === 'free account') {
+        return '免费';
+    }
+    if ($cycle === 'one time') {
+        return '一次性，无续费';
+    }
+    return telegramnotify_money((float) ($row->amount ?? 0), $currency) . ' / ' . telegramnotify_cycle_label((string) ($row->billingcycle ?? ''));
+}
+
+function telegramnotify_due_label(string $date): string
+{
+    $date = trim($date);
+    if ($date === '' || $date === '0000-00-00') {
+        return '无';
+    }
+    return $date;
+}
+
+function telegramnotify_status_label(string $status): string
+{
+    $map = [
+        'active' => '正常',
+        'pending' => '待开通',
+        'suspended' => '已暂停',
+        'cancelled' => '已取消',
+        'fraud' => '异常',
+        'completed' => '已完成',
+    ];
+    $key = strtolower(trim($status));
+    return $map[$key] ?? ($status !== '' ? $status : '—');
+}
+
+function telegramnotify_text_len(string $text): int
+{
+    if (function_exists('mb_strlen')) {
+        return (int) mb_strlen($text, 'UTF-8');
+    }
+    return strlen($text);
+}
+
+function telegramnotify_chunk_messages(string $title, array $blocks): array
+{
+    $parts = [];
+    $current = $title;
+    foreach ($blocks as $block) {
+        $candidate = $current . "\n\n" . $block;
+        if (telegramnotify_text_len($candidate) > 3500 && $current !== $title) {
+            $parts[] = $current;
+            $current = '<b>你的产品（续）</b>' . "\n\n" . $block;
+            continue;
+        }
+        $current = $candidate;
+    }
+    if ($current !== $title) {
+        $parts[] = $current;
+    }
+    return $parts;
+}
+
+function telegramnotify_reply_products(string $chatId): void
+{
+    try {
+        $client = telegramnotify_command_client($chatId);
+        if ($client === null) {
+            return;
+        }
+        $clientId = (int) $client->id;
+        $query = Capsule::table('tblhosting as h')
+            ->leftJoin('tblproducts as p', 'p.id', '=', 'h.packageid')
+            ->where('h.userid', $clientId)
+            ->where('h.domainstatus', '<>', 'Terminated');
+        $total = (int) (clone $query)->count();
+        if ($total === 0) {
+            telegramnotify_send_chat($chatId, '当前没有产品。已终止的服务不会列出。', true);
+            return;
+        }
+        $rows = (clone $query)
+            ->orderByRaw("CASE WHEN h.nextduedate IS NULL OR h.nextduedate = '0000-00-00' THEN 1 ELSE 0 END")
+            ->orderBy('h.nextduedate', 'asc')
+            ->orderBy('h.id', 'asc')
+            ->limit(50)
+            ->get(['h.id', 'h.domain', 'h.domainstatus', 'h.nextduedate', 'h.amount', 'h.billingcycle', 'p.name as product']);
+        $currency = telegramnotify_currency_row((int) $client->currency);
+        $blocks = [];
+        foreach ($rows as $row) {
+            $name = trim((string) ($row->product ?? ''));
+            if ($name === '') {
+                $name = '产品 #' . (int) $row->id;
+            }
+            $domain = trim((string) ($row->domain ?? ''));
+            $lines = ['<b>' . telegramnotify_html($name) . '</b>'];
+            if ($domain !== '') {
+                $lines[] = telegramnotify_html($domain);
+            }
+            $lines[] = '到期 ' . telegramnotify_html(telegramnotify_due_label((string) $row->nextduedate))
+                . ' · ' . telegramnotify_html(telegramnotify_status_label((string) $row->domainstatus));
+            $lines[] = '续费 ' . telegramnotify_html(telegramnotify_renewal_price($row, $currency));
+            $blocks[] = implode("\n", $lines);
+        }
+        $title = '<b>你的产品</b>';
+        $shown = count($blocks);
+        if ($total > $shown) {
+            $title .= "\n共 " . $total . ' 个，这里显示即将到期的 ' . $shown . ' 个。';
+        }
+        $parts = telegramnotify_chunk_messages($title, $blocks);
+        foreach ($parts as $part) {
+            if (!telegramnotify_send_chat($chatId, $part, true)) {
+                return;
+            }
+        }
+    } catch (Throwable $e) {
+        telegramnotify_log('查询产品失败: ' . $e->getMessage());
+        telegramnotify_send_chat($chatId, '暂时无法查询产品，请稍后再试。', false);
+    }
+}
+
+function telegramnotify_reply_account(string $chatId): void
+{
+    try {
+        $client = telegramnotify_command_client($chatId);
+        if ($client === null) {
+            return;
+        }
+        $clientId = (int) $client->id;
+        $count = (int) Capsule::table('tblhosting')
+            ->where('userid', $clientId)
+            ->where('domainstatus', '<>', 'Terminated')
+            ->count();
+        $currency = telegramnotify_currency_row((int) $client->currency);
+        $email = trim((string) ($client->email ?? ''));
+        $base = telegramnotify_base_url();
+        $link = $base !== '' ? $base . '/clientarea.php' : '';
+        $text = telegramnotify_message('个人信息', [
+            '邮箱' => $email !== '' ? $email : '—',
+            '余额' => telegramnotify_money((float) ($client->credit ?? 0), $currency),
+            '产品数量' => (string) $count,
+        ], '打开客户区', $link);
+        telegramnotify_send_chat($chatId, $text, true);
+    } catch (Throwable $e) {
+        telegramnotify_log('查询个人信息失败: ' . $e->getMessage());
+        telegramnotify_send_chat($chatId, '暂时无法查询个人信息，请稍后再试。', false);
+    }
+}
+
 function telegramnotify_handle_update(array $update): void
 {
     try {
@@ -409,18 +715,26 @@ function telegramnotify_handle_update(array $update): void
         if (preg_match('#^/start(?:@\w+)?(?:\s+(\S+))?\s*$#', $text, $match)) {
             $arg = $match[1] ?? '';
             if (!preg_match('#^c_([A-Za-z0-9]+)$#', $arg, $tokenMatch)) {
-                telegramnotify_send_chat($chatId, '请从 WHMCS 客户区打开绑定链接。', false);
+                telegramnotify_send_chat($chatId, telegramnotify_welcome_text(telegramnotify_chat_is_bound($chatId)), false);
                 return;
             }
             $result = telegramnotify_consume_token($tokenMatch[1], $chatId, $username);
             if ($result === 'ok') {
-                telegramnotify_send_chat($chatId, "绑定成功。产品开通、续费账单、催缴和暂停会发到这里。\n发送 /unbind 可解除绑定。", true);
+                telegramnotify_send_chat($chatId, "绑定成功。产品开通、续费账单、催缴和暂停会发到这里。\n\n/products 查询产品和续费\n/account 查看个人信息\n/unbind 解除绑定", true);
                 return;
             }
             telegramnotify_send_chat($chatId, '绑定链接无效或已过期，请回客户区重新生成。', false);
             return;
         }
-        if (preg_match('#^/unbind(?:@\w+)?\s*$#', $text)) {
+        if (preg_match('#^/products(?:@\w+)?\s*$#i', $text)) {
+            telegramnotify_reply_products($chatId);
+            return;
+        }
+        if (preg_match('#^/account(?:@\w+)?\s*$#i', $text)) {
+            telegramnotify_reply_account($chatId);
+            return;
+        }
+        if (preg_match('#^/unbind(?:@\w+)?\s*$#i', $text)) {
             $count = telegramnotify_unbind_chat($chatId);
             $reply = $count > 0 ? '已解除绑定。' : '当前没有绑定。';
             telegramnotify_send_chat($chatId, $reply, false);

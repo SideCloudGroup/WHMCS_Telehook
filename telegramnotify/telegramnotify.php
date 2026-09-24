@@ -12,8 +12,8 @@ function telegramnotify_config(): array
 {
     return [
         'name' => 'Telehook',
-        'description' => '客户绑定 Telegram 后，接收产品开通、续费账单、催缴和暂停通知。',
-        'version' => '1.0.4',
+        'description' => '客户绑定 Telegram 后，接收产品开通、续费账单、催缴和暂停通知，并可查询产品和账户。',
+        'version' => '1.0.5',
         'author' => 'SideCloud',
         'language' => 'chinese',
         'fields' => [
@@ -150,7 +150,7 @@ function telegramnotify_output($vars): void
         $token = telegramnotify_session_token('telehook_admin_csrf');
         echo '<div style="margin-bottom:16px;padding:16px;border:1px solid #d8e2ef;border-radius:8px;background:#fff">';
         echo '<h3 style="margin-top:0">注册 Webhook</h3>';
-        echo '<p>保存插件设置不会联系 Telegram。只有点这个按钮才会注册，结果会直接显示在下面。</p>';
+        echo '<p>保存插件设置不会联系 Telegram。只有点这个按钮才会注册，结果会直接显示在下面。注册时会同步指令菜单：/start、/products、/account、/unbind。</p>';
         echo '<p>回调地址：<code>' . telegramnotify_h(telegramnotify_webhook_url()) . '</code></p>';
         if (is_array($webhook)) {
             $ok = !empty($webhook['ok']);
